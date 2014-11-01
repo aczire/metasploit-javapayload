@@ -26,9 +26,9 @@ import java.util.concurrent.Future;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
-import javapayload.stager.DummyStage;
-import javapayload.stager.Stager;
-import javapayload.stager.StreamForwarder;
+import javapayload.stage.DummyStage;
+import javapayload.stage.Stage;
+import javapayload.stage.StreamForwarder;
 
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
@@ -229,7 +229,7 @@ public class PayloadTest extends TestCase {
 
 	private void handleSocketCommunication(OutputStream out, InputStream in) throws Exception {
 		ByteArrayOutputStream baos = new ByteArrayOutputStream();
-		StreamForwarder.forward(Stager.class.getResourceAsStream(Stager.class.getSimpleName()+".class"), baos, false);
+		StreamForwarder.forward(Stage.class.getResourceAsStream(Stage.class.getSimpleName()+".class"), baos, false);
 		byte[] stageClass = baos.toByteArray();
 		baos.reset();
 		StreamForwarder.forward(DummyStage.class.getResourceAsStream(DummyStage.class.getSimpleName()+".class"), baos);

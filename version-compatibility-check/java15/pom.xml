@@ -12,6 +12,7 @@
 	<name>JavaPayload Compatibility Checks (Java 1.5)</name>
 	<url>http://www.metasploit.com/</url>
 	<build>
+	<pluginManagement>
 		<plugins>
 			<plugin>
 				<artifactId>maven-antrun-plugin</artifactId>
@@ -56,5 +57,6 @@
 				</executions>
 			</plugin>
 		</plugins>
+	</pluginManagement>
 	</build>
 </project>

@@ -50,10 +50,5 @@
 	</build>
 	<modules>
 		<module>java16</module>
-		<module>java15</module>
-		<module>java14</module>
-		<module>java13</module>
-		<module>java12</module>
-		<module>android-api3</module>
 	</modules>
 </project>
